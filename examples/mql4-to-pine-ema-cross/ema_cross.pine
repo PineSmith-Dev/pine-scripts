@@ -1,0 +1,22 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PineSmith
+//@version=6
+// EMA Cross: the Pine v6 "after" side of a conversion example (from ema_cross.mq4).
+// Same logic as the MQL4 version, plus a cross marker and an alert, which the original didn't have.
+indicator("EMA Cross", overlay = true)
+
+fastLen = input.int(9, "Fast length", minval = 1)
+slowLen = input.int(21, "Slow length", minval = 1)
+
+fast = ta.ema(close, fastLen)
+slow = ta.ema(close, slowLen)
+plot(fast, "Fast EMA", color.aqua)
+plot(slow, "Slow EMA", color.orange)
+
+// added: cross markers + alerts
+crossUp   = ta.crossover(fast, slow)
+crossDown = ta.crossunder(fast, slow)
+plotshape(crossUp,   "Cross up",   shape.triangleup,   location.belowbar, color.aqua,   size = size.tiny)
+plotshape(crossDown, "Cross down", shape.triangledown, location.abovebar, color.orange, size = size.tiny)
+alertcondition(crossUp,   "Cross up",   "{{ticker}}: fast EMA crossed above slow EMA")
+alertcondition(crossDown, "Cross down", "{{ticker}}: fast EMA crossed below slow EMA")

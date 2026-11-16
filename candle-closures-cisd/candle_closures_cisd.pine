@@ -1,0 +1,227 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PineSmith
+//@version=6
+indicator("Candle Closures + CISD", shorttitle = "C2/C3 + CISD", overlay = true, max_lines_count = 500, max_boxes_count = 300, max_labels_count = 300)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// WHAT IT DOES
+// 1. Reads the higher-timeframe (HTF) candles and marks the two formations of the model:
+//      • Candle 2 closure: the candle sweeps the previous candle's high/low and closes back inside its range.
+//      • Candle 3 closure: the previous candle ran a low/high (and closed beyond it, so it was no C2), then
+//        this candle holds that extreme and closes through its body.
+//    After a C3 that closes beyond C2's extreme, the next candle is treated as C4 (continuation).
+// 2. Draws the previous HTF candle's high, low and EQ. EQ rules:
+//      • a C2 closing in the swing direction, any C3/C4, or a full-bodied candle → 50% of the whole range
+//      • a C2 closing against the swing (or a doji) → 50% of close-to-wick
+// 3. While the expected expansion candle (C3/C4) is forming, marks lower-timeframe CISDs in its direction:
+//      • bullish CISD = a candle closes above the OPEN of the first candle in the latest down-close run
+//      • the last opposing candle of that run is boxed as the order block
+//    If price closes beyond EQ, the model is marked invalid for the rest of that HTF candle.
+// 4. Alerts for every signal.
+// Educational tool: it marks candle formations; it does not predict outcomes or give trade signals. Not financial advice.
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+// ── Inputs ───────────────────────────────────────────────────────────────────────────────────
+grpM = "Model"
+htf        = input.timeframe("240", "HTF candle to read", group = grpM, tooltip = "The candle whose wick/body you are trading, e.g. 4H on a 15m chart, Daily on a 1H chart, 1H on a 5m chart.")
+useC2      = input.bool(true, "Detect candle 2 closures", group = grpM)
+useC3      = input.bool(true, "Detect candle 3 closures", group = grpM)
+useC4      = input.bool(true, "Carry the model into C4 after a strong C3", group = grpM)
+keyLevel   = input.bool(false, "Only at a key level (sweep of PDH/PDL or an HTF extreme)", group = grpM, tooltip = "Only mark a closure when its wick swept the previous day's high/low or the extreme of the last N HTF candles.")
+keyLook    = input.int(6, "HTF extreme lookback (candles)", minval = 1, maxval = 50, group = grpM, tooltip = "6 x 4H = one trading day.")
+cisdInModel = input.bool(true, "Only show CISDs inside the expected expansion candle", group = grpM, tooltip = "On: CISDs only appear during the HTF candle after a C2/C3 closure, in its direction, while EQ holds. Off: every CISD on the chart.")
+
+grpS = "Show"
+showPrev   = input.bool(true, "Previous HTF candle high / low / EQ", group = grpS)
+showPD     = input.bool(true, "PDH / PDL", group = grpS)
+showCISD   = input.bool(true, "CISD levels", group = grpS)
+showOB     = input.bool(true, "CISD order blocks", group = grpS)
+showTable  = input.bool(true, "Status panel", group = grpS)
+obBars     = input.int(12, "Order block length (bars)", minval = 1, group = grpS)
+
+grpC = "Colours"
+colBull    = input.color(#2ec5ff, "Bullish", group = grpC)
+colBear    = input.color(#ff4f9a, "Bearish", group = grpC)
+colLvl     = input.color(#8c8ca3, "Levels", group = grpC)
+colEQ      = input.color(#e0c068, "EQ", group = grpC)
+
+if timeframe.in_seconds() >= timeframe.in_seconds(htf)
+    runtime.error("Set the HTF above the chart timeframe (for example a 15m chart with a 4H HTF).")
+
+// ── HTF candles (non-repainting: values of completed candles only) ──────────────────────────
+// p = the HTF candle that just closed, q = the one before it, r = the one before that
+[ph, pl, po, pc, qh, ql, qo, qc, rh, rl] = request.security(syminfo.tickerid, htf, [high[1], low[1], open[1], close[1], high[2], low[2], open[2], close[2], high[3], low[3]], lookahead = barmerge.lookahead_on)
+// extremes of the keyLook candles BEFORE p (for C2s) and BEFORE q (for C3s)
+[xLo, xHi, xLoQ, xHiQ] = request.security(syminfo.tickerid, htf, [ta.lowest(low, keyLook)[2], ta.highest(high, keyLook)[2], ta.lowest(low, keyLook)[3], ta.highest(high, keyLook)[3]], lookahead = barmerge.lookahead_on)
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+newHTF = ta.change(time(htf)) != 0
+
+// ── Formations on the candle that just closed ────────────────────────────────────────────────
+// key level: the swing extreme took the previous day's high/low or the HTF extreme of the last `keyLook` candles
+bullKey = not keyLevel or pl < pdl or pl < xLo
+bearKey = not keyLevel or ph > pdh or ph > xHi
+bullC2 = useC2 and bullKey and pl < ql and pc > ql and pc <= qh      // swept q's low, closed back inside q's range
+bearC2 = useC2 and bearKey and ph > qh and pc < qh and pc >= ql      // swept q's high, closed back inside q's range
+// C3: q ran r's extreme and closed beyond it (so q was not a C2); p held q's extreme and closed through q's body
+qKeyLo = not keyLevel or ql < pdl or ql < xLoQ
+qKeyHi = not keyLevel or qh > pdh or qh > xHiQ
+bullC3 = useC3 and not bullC2 and qKeyLo and ql < rl and qc <= rl and pl > ql and pc > math.max(qo, qc)
+bearC3 = useC3 and not bearC2 and qKeyHi and qh > rh and qc >= rh and ph < qh and pc < math.min(qo, qc)
+
+// ── Model state for the HTF candle now forming ───────────────────────────────────────────────
+var int    modelDir = 0       // +1 bullish, -1 bearish, 0 none
+var string modelTag = ""      // "C3" expected after a C2, "C4" after a C3, "C4+" carried
+var float  modelEQ  = na
+var float  modelInv = na      // swing extreme that invalidates the idea
+var bool   eqLost   = false
+
+if newHTF
+    eqLost := false
+    if bullC2
+        modelDir := 1
+        modelTag := "C3"
+        modelEQ  := pc >= po ? (ph + pl) / 2 : (pc + pl) / 2
+        modelInv := pl
+    else if bearC2
+        modelDir := -1
+        modelTag := "C3"
+        modelEQ  := pc <= po ? (ph + pl) / 2 : (pc + ph) / 2
+        modelInv := ph
+    else if bullC3
+        modelDir := 1
+        modelTag := "C4"
+        modelEQ  := (ph + pl) / 2
+        modelInv := ql
+    else if bearC3
+        modelDir := -1
+        modelTag := "C4"
+        modelEQ  := (ph + pl) / 2
+        modelInv := qh
+    else if useC4 and modelDir == 1 and pc > qh and pl > modelInv
+        modelTag := "C4+"          // the expansion candle closed beyond the previous high: one more continuation
+        modelEQ  := (ph + pl) / 2
+    else if useC4 and modelDir == -1 and pc < ql and ph < modelInv
+        modelTag := "C4+"
+        modelEQ  := (ph + pl) / 2
+    else
+        modelDir := 0
+        modelTag := ""
+        modelEQ  := na
+        modelInv := na
+
+// EQ must hold: a chart-timeframe close beyond it invalidates the model for this HTF candle
+eqJustLost = false
+if modelDir == 1 and not eqLost and close < modelEQ
+    eqLost := true
+    eqJustLost := true
+if modelDir == -1 and not eqLost and close > modelEQ
+    eqLost := true
+    eqJustLost := true
+modelLive = modelDir != 0 and not eqLost
+
+// ── Previous HTF candle levels ───────────────────────────────────────────────────────────────
+var line lnH  = na
+var line lnL  = na
+var line lnEQ = na
+var label lbEQ = na
+if newHTF and showPrev
+    lnH  := line.new(bar_index, ph, bar_index, ph, color = colLvl, style = line.style_dotted, width = 1)
+    lnL  := line.new(bar_index, pl, bar_index, pl, color = colLvl, style = line.style_dotted, width = 1)
+    eqv   = na(modelEQ) ? (ph + pl) / 2 : modelEQ
+    lnEQ := line.new(bar_index, eqv, bar_index, eqv, color = colEQ, style = line.style_dashed, width = 1)
+    lbEQ := label.new(bar_index, eqv, "EQ", style = label.style_label_right, color = color.new(colEQ, 100), textcolor = colEQ, size = size.tiny)
+if showPrev and not na(lnH)
+    line.set_x2(lnH, bar_index)
+    line.set_x2(lnL, bar_index)
+    line.set_x2(lnEQ, bar_index)
+    if eqJustLost
+        line.set_style(lnEQ, line.style_solid)
+        label.set_text(lbEQ, "EQ lost")
+
+// ── Formation labels ─────────────────────────────────────────────────────────────────────────
+if newHTF and bullC2
+    label.new(bar_index, pl, "C2 ▲", style = label.style_label_up, color = color.new(colBull, 20), textcolor = color.white, size = size.small)
+if newHTF and bearC2
+    label.new(bar_index, ph, "C2 ▼", style = label.style_label_down, color = color.new(colBear, 20), textcolor = color.white, size = size.small)
+if newHTF and bullC3
+    label.new(bar_index, pl, "C3 ▲", style = label.style_label_up, color = color.new(colBull, 45), textcolor = color.white, size = size.small)
+if newHTF and bearC3
+    label.new(bar_index, ph, "C3 ▼", style = label.style_label_down, color = color.new(colBear, 45), textcolor = color.white, size = size.small)
+
+// ── PDH / PDL ────────────────────────────────────────────────────────────────────────────────
+plot(showPD ? pdh : na, "PDH", color = color.new(colLvl, 30), style = plot.style_linebr, linewidth = 1)
+plot(showPD ? pdl : na, "PDL", color = color.new(colLvl, 30), style = plot.style_linebr, linewidth = 1)
+
+// ── Lower-timeframe CISD ─────────────────────────────────────────────────────────────────────
+isBull = close > open
+isBear = close < open
+var float downRunOpen = na    // open of the first candle in the latest down-close run
+var int   downRunBar  = na
+var float upRunOpen   = na
+var int   upRunBar    = na
+var float lastDownH   = na
+var float lastDownL   = na
+var int   lastDownBar = na
+var float lastUpH     = na
+var float lastUpL     = na
+var int   lastUpBar   = na
+
+if isBear
+    if not (close[1] < open[1])
+        downRunOpen := open
+        downRunBar  := bar_index
+    lastDownH := high
+    lastDownL := low
+    lastDownBar := bar_index
+if isBull
+    if not (close[1] > open[1])
+        upRunOpen := open
+        upRunBar  := bar_index
+    lastUpH := high
+    lastUpL := low
+    lastUpBar := bar_index
+
+bullCISDraw = isBull and not na(downRunOpen) and close > downRunOpen
+bearCISDraw = isBear and not na(upRunOpen) and close < upRunOpen
+bullCISD = bullCISDraw and (not cisdInModel or (modelLive and modelDir == 1))
+bearCISD = bearCISDraw and (not cisdInModel or (modelLive and modelDir == -1))
+
+if bullCISD and showCISD
+    line.new(downRunBar, downRunOpen, bar_index, downRunOpen, color = colBull, width = 2)
+    label.new(bar_index, downRunOpen, "CISD", style = label.style_label_left, color = color.new(colBull, 100), textcolor = colBull, size = size.tiny)
+if bullCISD and showOB and not na(lastDownBar)
+    box.new(lastDownBar, lastDownH, bar_index + obBars, lastDownL, border_color = color.new(colBull, 40), bgcolor = color.new(colBull, 85))
+if bearCISD and showCISD
+    line.new(upRunBar, upRunOpen, bar_index, upRunOpen, color = colBear, width = 2)
+    label.new(bar_index, upRunOpen, "CISD", style = label.style_label_left, color = color.new(colBear, 100), textcolor = colBear, size = size.tiny)
+if bearCISD and showOB and not na(lastUpBar)
+    box.new(lastUpBar, lastUpH, bar_index + obBars, lastUpL, border_color = color.new(colBear, 40), bgcolor = color.new(colBear, 85))
+
+// each run's level fires once
+if bullCISDraw
+    downRunOpen := na
+if bearCISDraw
+    upRunOpen := na
+
+// ── Status panel ─────────────────────────────────────────────────────────────────────────────
+var table panel = table.new(position.top_right, 2, 4, bgcolor = color.new(#0d0c18, 15), border_width = 0, frame_color = color.new(#ffffff, 85), frame_width = 1)
+if showTable and barstate.islast
+    dirTxt = modelDir == 1 ? "Bullish " + modelTag : modelDir == -1 ? "Bearish " + modelTag : "No model"
+    dirCol = modelDir == 1 ? colBull : modelDir == -1 ? colBear : colLvl
+    table.cell(panel, 0, 0, "HTF", text_color = colLvl, text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 0, htf, text_color = color.white, text_size = size.small, text_halign = text.align_right)
+    table.cell(panel, 0, 1, "Model", text_color = colLvl, text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 1, dirTxt, text_color = dirCol, text_size = size.small, text_halign = text.align_right)
+    table.cell(panel, 0, 2, "EQ", text_color = colLvl, text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 2, na(modelEQ) ? "–" : (eqLost ? "lost " : "holding ") + str.tostring(modelEQ, format.mintick), text_color = eqLost ? colBear : colEQ, text_size = size.small, text_halign = text.align_right)
+    table.cell(panel, 0, 3, "Invalidation", text_color = colLvl, text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 3, na(modelInv) ? "–" : str.tostring(modelInv, format.mintick), text_color = color.white, text_size = size.small, text_halign = text.align_right)
+
+// ── Alerts ───────────────────────────────────────────────────────────────────────────────────
+alertcondition(newHTF and bullC2, "HTF bullish C2 closure", "{{ticker}}: HTF bullish candle 2 closure — expect C3 up")
+alertcondition(newHTF and bearC2, "HTF bearish C2 closure", "{{ticker}}: HTF bearish candle 2 closure — expect C3 down")
+alertcondition(newHTF and bullC3, "HTF bullish C3 closure", "{{ticker}}: HTF bullish candle 3 closure — expect C4 up")
+alertcondition(newHTF and bearC3, "HTF bearish C3 closure", "{{ticker}}: HTF bearish candle 3 closure — expect C4 down")
+alertcondition(bullCISD, "Bullish CISD in model", "{{ticker}}: bullish CISD inside the expected expansion candle")
+alertcondition(bearCISD, "Bearish CISD in model", "{{ticker}}: bearish CISD inside the expected expansion candle")
+alertcondition(eqJustLost, "Model EQ lost", "{{ticker}}: price closed beyond the model EQ — idea invalid for this HTF candle")
