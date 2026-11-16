@@ -31,7 +31,7 @@ Clean, commented **Pine Script v6** for TradingView, tested on a live chart befo
 **What I won't do:** promise profits, sell signals, or edit protected/invite-only scripts without the source.
 
 ## Hire me
-- Fiverr: *coming soon*
+- Fiverr: [fix, convert or add alerts to your Pine Script](https://www.fiverr.com/pinesmith/fix-convert-or-add-alerts-to-your-tradingview-pine-script-indicator)
 - Upwork: *coming soon*
 
 ---
